@@ -7,6 +7,7 @@ pub enum BaboDbError {
     Io(std::io::Error),
     CorruptRecord(&'static str),
     KeyTooLarge(usize),
+    LogTooLarge(u64),
     ValueTooLarge(usize),
 }
 
@@ -16,6 +17,7 @@ impl Display for BaboDbError {
             Self::Io(error) => write!(f, "io error: {error}"),
             Self::CorruptRecord(message) => write!(f, "corrupt record: {message}"),
             Self::KeyTooLarge(size) => write!(f, "key is too large: {size} bytes"),
+            Self::LogTooLarge(size) => write!(f, "log is too large: {size} bytes"),
             Self::ValueTooLarge(size) => write!(f, "value is too large: {size} bytes"),
         }
     }
@@ -25,7 +27,10 @@ impl std::error::Error for BaboDbError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::CorruptRecord(_) | Self::KeyTooLarge(_) | Self::ValueTooLarge(_) => None,
+            Self::CorruptRecord(_)
+            | Self::KeyTooLarge(_)
+            | Self::LogTooLarge(_)
+            | Self::ValueTooLarge(_) => None,
         }
     }
 }

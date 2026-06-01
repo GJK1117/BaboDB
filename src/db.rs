@@ -1,3 +1,4 @@
+use crate::error::BaboDbError;
 use crate::error::Result;
 use crate::log::{read_record, write_record, LogRecord};
 use std::collections::BTreeMap;
@@ -5,6 +6,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Seek, SeekFrom};
 use std::path::Path;
 
+const MAX_LOG_LEN: u64 = 1024 * 1024 * 1024;
+
+/// A tiny single-file key-value database.
+///
+/// `BaboDb` is a single-process prototype. Do not open the same database file
+/// through multiple `BaboDb` instances at the same time.
 pub struct BaboDb {
     file: File,
     index: BTreeMap<Vec<u8>, Vec<u8>>,
@@ -63,6 +70,11 @@ impl BaboDb {
 }
 
 fn load_index(file: &File) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+    let log_len = file.metadata()?.len();
+    if log_len > MAX_LOG_LEN {
+        return Err(BaboDbError::LogTooLarge(log_len));
+    }
+
     let mut reader = BufReader::new(file.try_clone()?);
     let mut index = BTreeMap::new();
 
@@ -90,22 +102,25 @@ mod tests {
     #[test]
     fn puts_gets_deletes_and_scans_values() {
         let path = test_path("basic");
-        let mut db = BaboDb::open(&path).unwrap();
 
-        db.put(b"name", b"babo").unwrap();
-        db.put(b"lang", b"rust").unwrap();
+        {
+            let mut db = BaboDb::open(&path).unwrap();
 
-        assert_eq!(db.get(b"name"), Some(b"babo".to_vec()));
-        assert_eq!(
-            db.scan(),
-            vec![
-                (b"lang".to_vec(), b"rust".to_vec()),
-                (b"name".to_vec(), b"babo".to_vec())
-            ]
-        );
-        assert!(db.delete(b"name").unwrap());
-        assert_eq!(db.get(b"name"), None);
-        assert!(!db.delete(b"missing").unwrap());
+            db.put(b"name", b"babo").unwrap();
+            db.put(b"lang", b"rust").unwrap();
+
+            assert_eq!(db.get(b"name"), Some(b"babo".to_vec()));
+            assert_eq!(
+                db.scan(),
+                vec![
+                    (b"lang".to_vec(), b"rust".to_vec()),
+                    (b"name".to_vec(), b"babo".to_vec())
+                ]
+            );
+            assert!(db.delete(b"name").unwrap());
+            assert_eq!(db.get(b"name"), None);
+            assert!(!db.delete(b"missing").unwrap());
+        }
 
         fs::remove_file(path).unwrap();
     }

@@ -1,9 +1,11 @@
 use crate::error::{BaboDbError, Result};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 
 const OP_PUT: u8 = 1;
 const OP_DELETE: u8 = 2;
 const HEADER_LEN: usize = 9;
+const MAX_KEY_LEN: usize = 1024 * 1024;
+const MAX_VALUE_LEN: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LogRecord {
@@ -77,13 +79,18 @@ pub(crate) fn read_record(reader: &mut impl Read) -> Result<Option<LogRecord>> {
     let key_len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
     let value_len = u32::from_le_bytes([header[5], header[6], header[7], header[8]]) as usize;
 
-    let mut key = vec![0_u8; key_len];
-    reader.read_exact(&mut key)?;
+    validate_decoded_len(key_len, MAX_KEY_LEN, BaboDbError::KeyTooLarge)?;
+    validate_decoded_len(value_len, MAX_VALUE_LEN, BaboDbError::ValueTooLarge)?;
+
+    let Some(key) = read_bytes(reader, key_len)? else {
+        return Ok(None);
+    };
 
     match op {
         OP_PUT => {
-            let mut value = vec![0_u8; value_len];
-            reader.read_exact(&mut value)?;
+            let Some(value) = read_bytes(reader, value_len)? else {
+                return Ok(None);
+            };
             Ok(Some(LogRecord::Put { key, value }))
         }
         OP_DELETE => {
@@ -95,6 +102,16 @@ pub(crate) fn read_record(reader: &mut impl Read) -> Result<Option<LogRecord>> {
             Ok(Some(LogRecord::Delete { key }))
         }
         _ => Err(BaboDbError::CorruptRecord("unknown operation")),
+    }
+}
+
+fn read_bytes(reader: &mut impl Read, len: usize) -> Result<Option<Vec<u8>>> {
+    let mut bytes = vec![0_u8; len];
+
+    match reader.read_exact(&mut bytes) {
+        Ok(()) => Ok(Some(bytes)),
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -115,9 +132,22 @@ fn validate_len(
     Ok(())
 }
 
+fn validate_decoded_len(
+    len: usize,
+    max: usize,
+    error: impl FnOnce(usize) -> BaboDbError,
+) -> std::result::Result<(), BaboDbError> {
+    if len > max {
+        return Err(error(len));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{read_record, write_record, LogRecord};
+    use super::{read_record, write_record, LogRecord, MAX_KEY_LEN, OP_PUT};
+    use crate::BaboDbError;
 
     #[test]
     fn round_trips_put_record() {
@@ -137,5 +167,31 @@ mod tests {
         write_record(&mut bytes, &record).unwrap();
 
         assert_eq!(read_record(&mut bytes.as_slice()).unwrap(), Some(record));
+    }
+
+    #[test]
+    fn ignores_truncated_tail_record() {
+        let mut bytes = LogRecord::put(b"name", b"babo").unwrap().encode();
+        bytes.extend_from_slice(&[OP_PUT, 4, 0, 0]);
+
+        let mut reader = bytes.as_slice();
+
+        assert_eq!(
+            read_record(&mut reader).unwrap(),
+            Some(LogRecord::put(b"name", b"babo").unwrap())
+        );
+        assert_eq!(read_record(&mut reader).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_oversized_decoded_key_before_allocating() {
+        let mut bytes = Vec::new();
+        bytes.push(OP_PUT);
+        bytes.extend_from_slice(&((MAX_KEY_LEN as u32) + 1).to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+
+        let error = read_record(&mut bytes.as_slice()).unwrap_err();
+
+        assert!(matches!(error, BaboDbError::KeyTooLarge(_)));
     }
 }
